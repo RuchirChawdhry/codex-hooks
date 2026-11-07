@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 from .hooks import EVENTS, HOOKS, dispatch
+from .state import repository_root
 
 EXAMPLE_CONFIG = """[hooks]
 change_tracker = true
@@ -30,6 +32,20 @@ strict = false
 
 [python]
 uv_only = true
+
+[git.commit_msg]
+require_ticket = false
+
+[git.pre_commit]
+format = true
+tests = true
+
+[git.post_checkout]
+uv_sync = true
+
+# Optional: override automatic Python/Go/Rust test discovery.
+# [git.tests]
+# command = ["uv", "run", "--group", "dev", "pytest", "-q"]
 """
 
 
@@ -72,9 +88,36 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("list", help="List included modules")
     replay = sub.add_parser("replay", help="Replay an event JSON")
     replay.add_argument("path", type=Path)
+    git_parser = sub.add_parser("git", help="Install and run Git hooks")
+    git_parser.add_argument("action", choices=("install", "commit-msg", "pre-commit", "post-checkout", "jobs", "worker"))
+    git_parser.add_argument("arguments", nargs="*")
     args = parser.parse_args(argv)
 
-    if args.command == "hook":
+    if args.command == "git":
+        from .git_bridge import install_git_hooks, run_git_hook
+        from .git_jobs import execute_job, jobs
+
+        root = repository_root(str(Path.cwd()))
+        try:
+            if args.action == "install":
+                print(f"Installed Git hooks: {install_git_hooks(root)}")
+            elif args.action == "jobs":
+                print(json.dumps(jobs(root), indent=2))
+            elif args.action == "worker":
+                if len(args.arguments) != 1:
+                    parser.error("git worker requires a job ID")
+                print(execute_job(root, int(args.arguments[0])))
+            else:
+                result = run_git_hook(args.action, args.arguments)
+                if args.action == "pre-commit":
+                    print(f"Staged revision: {result['staged_tree']} | test job: {result['test_job']}")
+                elif args.action == "post-checkout" and result["initialized"]:
+                    print("Initialized linked worktree (uv synced: "
+                          + str(result["uv_sync"]).lower() + ")")
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+            print(f"codex-hooks git: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+    elif args.command == "hook":
         try:
             data = json.load(sys.stdin)
             if not isinstance(data, dict):

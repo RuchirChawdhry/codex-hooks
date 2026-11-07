@@ -18,3 +18,18 @@ strict = false
 
 [python]
 uv_only = true
+
+
+[git.commit_msg]
+require_ticket = false
+
+[git.pre_commit]
+format = true
+tests = true
+
+[git.post_checkout]
+uv_sync = true
+
+# Optional test runner override, as an argv array, not a shell string.
+# [git.tests]
+# command = ["uv", "run", "--group", "dev", "pytest", "-q"]

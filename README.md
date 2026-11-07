@@ -48,7 +48,7 @@ to review the installed hook definitions.
 
 ## Configuration
 
-All seven modules are enabled by default. Copy and edit settings from
+All Codex lifecycle modules are enabled by default. Copy and edit settings from
 .codex-hooks.example.toml. Individual modules can be disabled in [hooks].
 
 The failure-loop detector offers feedback on the second consecutive
@@ -108,6 +108,72 @@ These hooks are not a security boundary, test suite, or autonomous orchestrator.
 Some hosted Codex environments do not run local command hooks.
 See the current Codex Hooks reference:
 https://learn.chatgpt.com/docs/hooks
+
+
+## Git hooks (opt-in)
+
+Install the three local Git hooks inside a target Git repository:
+
+    codex-hooks git install
+
+The installer creates executable shell wrappers in .githooks/ and sets
+core.hooksPath to the absolute .githooks directory for all linked worktrees.
+It refuses to replace custom existing hook
+paths or conflicting scripts. The Python package install alone does not
+activate local Git hooks.
+
+- **commit-msg** validates Conventional Commits subjects. Merge, revert,
+  fixup and squash subjects are accepted. A ticket ID is optional by default;
+  enable require_ticket to require a Ticket: T-001 message trailer.
+- **pre-commit** runs uv run --no-sync ruff format on staged Python files,
+  then stages those exact paths. If a staged Python file has additional
+  unstaged edits, formatting aborts rather than overwriting partial staging.
+  Ruff must already be installed in the uv-managed environment.
+  The hook then records HEAD and the candidate staged tree SHA in SQLite
+  and queues isolated tests without waiting for completion.
+- **post-checkout** initializes each newly detected linked worktree once.
+  If a pyproject.toml is present, it runs uv sync --locked when uv.lock
+  exists or uv sync otherwise. Ordinary branch/file checkouts do not
+  reinstall the environment after successful initialization.
+  Checkout itself cannot be rolled back if uv sync fails.
+
+### Revision identity and non-blocking test runs
+
+At pre-commit time the new commit does not exist yet. We record the Git
+index tree SHA returned by git write-tree, along with the previous HEAD
+revision. The test worker exports this exact staged tree with git archive
+and validates it in a separate temporary directory. Later worktree edits
+cannot change which code that job tests.
+
+The hook persists a SQLite job and starts a detached validation worker.
+Test failures never retroactively block the commit: a queued job is not a
+passing result. You can inspect and manually run queued jobs:
+
+    codex-hooks git jobs
+    codex-hooks git worker JOB_ID
+
+Automatic runner discovery supports Python with pytest via uv, Rust, and Go.
+For custom tests, configure an argument array (no shell interpolation):
+
+    [git.tests]
+    command = ["uv", "run", "--group", "dev", "pytest", "-q"]
+
+The worker stores status, exit code, and output digest, not raw test logs,
+and removes its temporary snapshot after completing.
+
+Configure the hooks in .codex-hooks.toml:
+
+    [git.commit_msg]
+    require_ticket = false
+
+    [git.pre_commit]
+    format = true
+    tests = true
+
+    [git.post_checkout]
+    uv_sync = true
+
+Hooks can be bypassed locally. Use CI for authoritative merge enforcement.
 
 ## Development
 
