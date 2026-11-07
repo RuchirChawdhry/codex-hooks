@@ -169,6 +169,18 @@ def install_git_hooks(root: Path) -> Path:
     configured = current.stdout.strip()
     if configured and configured != ".githooks":
         raise FileExistsError(f"core.hooksPath already points to {configured}; not replacing.")
+    # Switching core.hooksPath must not silently disable previously active hooks.
+    if not configured:
+        default_hooks = Path(git(root, "rev-parse", "--git-path", "hooks").stdout.strip())
+        if not default_hooks.is_absolute():
+            default_hooks = root / default_hooks
+        for name in GIT_HOOKS:
+            existing = default_hooks / name
+            if existing.is_file() and os.access(existing, os.X_OK):
+                raise FileExistsError(
+                    f"Existing Git hook {existing} would be disabled; "
+                    "migrate or chain it explicitly before installing."
+                )
     for name in GIT_HOOKS:
         target = directory / name
         if target.exists() and target.read_text(encoding="utf-8") != hook_script(name):
