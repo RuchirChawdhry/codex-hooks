@@ -1,4 +1,4 @@
-"""Seven composable hook behaviors driven by native Codex lifecycle payloads."""
+"""Composable lifecycle handlers with event dispatch and bounded state."""
 
 from __future__ import annotations
 
@@ -52,57 +52,52 @@ def fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:20]
 
 
+def _file_metadata(path: Path) -> dict:
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > 2_000_000:
+        return {}
+    with path.open("rb") as stream:
+        return {"digest": hashlib.sha256(stream.read()).hexdigest()[:16]}
+
+
 def git_worktree(root: Path) -> dict[str, dict]:
-    """Best-effort worktree observation, including pre-existing dirty files."""
+    """Observe Git status without following symlinks or reading large files."""
     try:
         output = subprocess.run(
             ["git", "status", "--porcelain=v1", "-z", "--untracked-files=normal"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=3,
-            check=True,
+            cwd=root, capture_output=True, text=True, errors="replace",
+            timeout=3, check=True,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return {}
-    entries = output.split("\0")
+
     files: dict[str, dict] = {}
-    index = 0
-    while index < len(entries):
-        entry = entries[index]
-        index += 1
-        if len(entry) < 4:
+    skip = -1
+    for index, entry in enumerate(output.split("\0")):
+        if index == skip or len(entry) < 4:
             continue
         status, name = entry[:2], entry[3:]
-        if "R" in status or "C" in status:
-            index += 1  # -z format supplies the original name as a second entry
+        skip = index + 1 if "R" in status or "C" in status else -1
         if len(files) >= 200:
             break
-        item: dict = {"status": status}
-        candidate = root / name
+        item = {"status": status}
         try:
-            # Never follow symlinks or read files outside the repository.
-            if candidate.is_file() and not candidate.is_symlink() and candidate.stat().st_size <= 2_000_000:
-                with candidate.open("rb") as stream:
-                    item["digest"] = hashlib.sha256(stream.read()).hexdigest()[:16]
+            item.update(_file_metadata(root / name))
         except OSError:
             pass
         files[name] = item
     return files
 
-
 def change_tracker(store: Store) -> None:
-    previous = store.get("worktree")
-    current = git_worktree(store.root)
-    if previous is not None:
-        changed = sorted(
-            name for name in set(previous) | set(current) if previous.get(name) != current.get(name)
-        )
-        if changed:
-            store.record("change_tracker", {"files": changed[:200]})
+    previous, current = store.get("worktree"), git_worktree(store.root)
     store.put("worktree", current)
-
+    if previous is None:
+        return
+    changed = sorted(
+        name for name in previous.keys() | current.keys()
+        if previous.get(name) != current.get(name)
+    )
+    if changed:
+        store.record("change_tracker", {"files": changed[:200]})
 
 def command_of(event: dict) -> str:
     value = event.get("tool_input", {})
@@ -272,82 +267,96 @@ def session_summary(store: Store, event: dict) -> None:
     store.record("session_summary", {"file": str(path)})
 
 
+def _pre_tool(store: Store, event: dict, config: dict) -> dict:
+    if not enabled(config, "uv_rewrite") or not config.get("python", {}).get("uv_only", True):
+        return {}
+    return uv_policy(event, store.root)
+
+
+def _session_start(store: Store, event: dict, config: dict) -> dict:
+    if enabled(config, "change_tracker") and store.get("worktree") is None:
+        store.put("worktree", git_worktree(store.root))
+    contexts = []
+    if enabled(config, "environment_detection"):
+        environment = detect_environment(store.root)
+        store.put("environment", environment)
+        contexts.append(environment_context(environment, enabled(config, "uv_rewrite")))
+    if enabled(config, "context_restore"):
+        restored = context_restore(store, event)
+        if restored:
+            contexts.append(restored["hookSpecificOutput"]["additionalContext"])
+    context = "\n".join(part for part in contexts if part)[:4200]
+    if not context:
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}}
+
+
+def _post_tool(store: Store, event: dict, config: dict) -> dict:
+    if enabled(config, "change_tracker"):
+        change_tracker(store)
+    command = command_of(event)
+    output = response_text(event.get("tool_response", {}))
+    code = result_code(event.get("tool_response"), output)
+    if enabled(config, "test_failure"):
+        test_failure(store, event, command, output, code)
+    feedback = (
+        failure_loop(store, event, command, output, code, config)
+        if enabled(config, "failure_loop") else None
+    )
+    if enabled(config, "context_checkpoint"):
+        if not enabled(config, "change_tracker"):
+            store.put("worktree", git_worktree(store.root))
+        context_checkpoint(store, checkpoint(store), "tool")
+    if not feedback:
+        return {}
+    return {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": feedback}}
+
+
+def _pre_compact(store: Store, event: dict, config: dict) -> dict:
+    if enabled(config, "context_snapshot"):
+        context_snapshot(store, event)
+    if enabled(config, "context_checkpoint"):
+        context_checkpoint(store, checkpoint(store), "precompact")
+    return {}
+
+
+def _subagent_stop(store: Store, event: dict, config: dict) -> dict:
+    result = agent_handoff(store, event, config) if enabled(config, "agent_handoff") else {}
+    if enabled(config, "context_checkpoint"):
+        context_checkpoint(store, checkpoint(store), "subagent")
+    return result
+
+
+def _interrupt(store: Store, event: dict, config: dict) -> dict:
+    if enabled(config, "context_checkpoint"):
+        context_checkpoint(store, checkpoint(store), "interrupt")
+    return {}
+
+
+def _session_end(store: Store, event: dict, config: dict) -> dict:
+    if enabled(config, "context_checkpoint"):
+        context_checkpoint(store, checkpoint(store), "session_end")
+    if enabled(config, "session_summary"):
+        session_summary(store, event)
+    return {}
+
+
+EVENT_HANDLERS = {
+    "PreToolUse": _pre_tool,
+    "SessionStart": _session_start,
+    "PostToolUse": _post_tool,
+    "PreCompact": _pre_compact,
+    "SubagentStop": _subagent_stop,
+    "Interrupt": _interrupt,
+    "SessionEnd": _session_end,
+}
+
+
 def dispatch(event: dict) -> dict:
-    """Evaluate a single Codex event; return native response JSON."""
-    name = event.get("hook_event_name")
-    if name not in EVENTS:
+    """Apply the handler registered for this Codex lifecycle event."""
+    handler = EVENT_HANDLERS.get(event.get("hook_event_name"))
+    if handler is None:
         return {}
     root = repository_root(str(event.get("cwd") or Path.cwd()))
-    config = config_for(root)
-    session = str(event.get("session_id") or "unknown")
-    with Store(root, session) as store:
-        if name == "PreToolUse":
-            if enabled(config, "uv_rewrite") and config.get("python", {}).get("uv_only", True):
-                return uv_policy(event, root)
-            return {}
-
-        if name == "SessionStart":
-            if enabled(config, "change_tracker") and store.get("worktree") is None:
-                store.put("worktree", git_worktree(root))
-            contexts: list[str] = []
-            if enabled(config, "environment_detection"):
-                environment = detect_environment(root)
-                store.put("environment", environment)
-                contexts.append(environment_context(environment, enabled(config, "uv_rewrite")))
-            if enabled(config, "context_restore"):
-                restored = context_restore(store, event)
-                if restored:
-                    contexts.append(restored["hookSpecificOutput"]["additionalContext"])
-            if contexts:
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "SessionStart",
-                        "additionalContext": "\n".join(contexts)[:4200],
-                    }
-                }
-            return {}
-
-        if name == "PostToolUse":
-            if enabled(config, "change_tracker"):
-                change_tracker(store)
-            command = command_of(event)
-            output = response_text(event.get("tool_response", {}))
-            code = result_code(event.get("tool_response"), output)
-            if enabled(config, "test_failure"):
-                test_failure(store, event, command, output, code)
-            feedback = None
-            if enabled(config, "failure_loop"):
-                feedback = failure_loop(store, event, command, output, code, config)
-            if enabled(config, "context_checkpoint"):
-                if not enabled(config, "change_tracker"):
-                    store.put("worktree", git_worktree(root))
-                context_checkpoint(store, checkpoint(store), "tool")
-            if feedback:
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PostToolUse",
-                        "additionalContext": feedback,
-                    }
-                }
-            return {}
-
-        if name == "PreCompact":
-            if enabled(config, "context_snapshot"):
-                context_snapshot(store, event)
-            if enabled(config, "context_checkpoint"):
-                context_checkpoint(store, checkpoint(store), "precompact")
-        elif name == "SubagentStop":
-            result = agent_handoff(store, event, config) if enabled(config, "agent_handoff") else {}
-            if enabled(config, "context_checkpoint"):
-                context_checkpoint(store, checkpoint(store), "subagent")
-            return result
-        elif name == "Interrupt":
-            if enabled(config, "context_checkpoint"):
-                # Persist the latest observed evidence, even if compaction never occurs.
-                context_checkpoint(store, checkpoint(store), "interrupt")
-        elif name == "SessionEnd":
-            if enabled(config, "context_checkpoint"):
-                context_checkpoint(store, checkpoint(store), "session_end")
-            if enabled(config, "session_summary"):
-                session_summary(store, event)
-    return {}
+    with Store(root, str(event.get("session_id") or "unknown")) as store:
+        return handler(store, event, config_for(root))
