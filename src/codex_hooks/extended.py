@@ -10,7 +10,6 @@ from pathlib import Path
 from .state import Store
 
 
-
 def detect_environment(root: Path) -> dict:
     """Inspect a bounded set of project markers; never execute project code."""
     markers = {

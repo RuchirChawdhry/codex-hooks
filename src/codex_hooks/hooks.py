@@ -9,8 +9,8 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from .state import Store, repository_root
 from .extended import context_checkpoint, detect_environment, environment_context
+from .state import Store, repository_root
 from .uv_rewrite import uv_policy
 
 EVENTS = ("PreToolUse", "PostToolUse", "PreCompact", "SessionStart", "SessionEnd", "SubagentStop", "Interrupt")
