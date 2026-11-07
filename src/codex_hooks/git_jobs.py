@@ -5,8 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -175,6 +173,3 @@ def worker_cli(args: list[str]) -> None:
     status = execute_job(Path(args[1]), int(args[2]))
     print(status)
 
-
-def _unused_imports_anchor() -> None:
-    """Unused optional names intentionally absent; keep module import-light."""
