@@ -6,9 +6,15 @@ context_restore = true
 session_summary = true
 agent_handoff = true
 test_failure = true
+context_checkpoint = true
+environment_detection = true
+uv_rewrite = true
 
 [failure_loop]
 threshold = 2
 
 [agent_handoff]
 strict = false
+
+[python]
+uv_only = true

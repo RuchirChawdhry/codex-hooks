@@ -3,7 +3,7 @@
 Modular, deterministic lifecycle hooks for OpenAI Codex. Version 0.1 focuses
 on observability, debugging signals, continuity, and structured handoffs.
 
-## The first seven hooks
+## Included hooks
 
 | Behavior | Codex event | Purpose |
 | --- | --- | --- |
@@ -14,6 +14,9 @@ on observability, debugging signals, continuity, and structured handoffs.
 | Session summary | SessionEnd | Write a JSON session summary |
 | Agent handoff | SubagentStop | Validate and record a subagent outcome |
 | Test failure | PostToolUse | Record failing test IDs and exit codes |
+| Context checkpoint | PostToolUse, PreCompact, SubagentStop, Interrupt, SessionEnd | Save rolling evidence checkpoints |
+| Environment detection | SessionStart | Detect languages, package managers, test runners |
+| uv command rewrite | PreToolUse | Rewrite pip operations to native uv project commands |
 
 These are deterministic handlers. They do not spawn another agent or model.
 
@@ -50,6 +53,18 @@ All seven modules are enabled by default. Copy and edit settings from
 
 The failure-loop detector offers feedback on the second consecutive
 identical failure of a command, without blocking the tool.
+
+In PEP 621 Python projects, PreToolUse automatically rewrites pip install requests
+to uv add requests, pip uninstall requests to uv remove requests, and
+pip install -r requirements.txt to uv add -r requirements.txt.
+The inspection commands pip list/freeze/show/check map to their uv pip forms.
+Outside a uv project, the low-level uv pip install/uninstall forms are used
+only when a virtual environment is available. Unsupported or compound
+pip invocations are denied rather than silently altered.
+
+Rewriting requires Codex permissionDecision=allow with updatedInput, which may
+affect normal tool approvals. Disable with [python] uv_only=false or
+[hooks] uv_rewrite=false. Check generated hook commands before trusting them.
 
 Subagent handoffs are advisory by default. To enforce them, set:
 
