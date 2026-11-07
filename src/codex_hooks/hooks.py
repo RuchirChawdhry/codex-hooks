@@ -10,7 +10,8 @@ import tomllib
 from pathlib import Path
 
 from .state import Store, repository_root
-from .extended import context_checkpoint, detect_environment, environment_context, uv_policy
+from .extended import context_checkpoint, detect_environment, environment_context
+from .uv_rewrite import uv_policy
 
 EVENTS = ("PreToolUse", "PostToolUse", "PreCompact", "SessionStart", "SessionEnd", "SubagentStop", "Interrupt")
 HOOKS = (
@@ -282,7 +283,7 @@ def dispatch(event: dict) -> dict:
     with Store(root, session) as store:
         if name == "PreToolUse":
             if enabled(config, "uv_guard") and config.get("python", {}).get("uv_only", True):
-                return uv_policy(event.get("tool_name"), command_of(event))
+                return uv_policy(event, root)
             return {}
 
         if name == "SessionStart":
