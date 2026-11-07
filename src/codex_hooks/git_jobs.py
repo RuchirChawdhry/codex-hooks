@@ -36,16 +36,16 @@ def test_command(root: Path, config: dict) -> list[str] | None:
         isinstance(arg, str) and arg for arg in configured
     ):
         return configured
-    if (root / "pyproject.toml").is_file() and (
-        (root / "tests").is_dir() or (root / "pytest.ini").is_file()
-    ):
-        return ["uv", "run", "--group", "dev", "pytest", "-q"]
-    if (root / "Cargo.toml").is_file():
-        return ["cargo", "test"]
-    if (root / "go.mod").is_file():
-        return ["go", "test", "./..."]
-    return None
-
+    runners = [
+        (
+            (root / "pyproject.toml").is_file()
+            and ((root / "tests").is_dir() or (root / "pytest.ini").is_file()),
+            ["uv", "run", "--group", "dev", "pytest", "-q"],
+        ),
+        ((root / "Cargo.toml").is_file(), ["cargo", "test"]),
+        ((root / "go.mod").is_file(), ["go", "test", "./..."]),
+    ]
+    return next((command for matched, command in runners if matched), None)
 
 def enqueue_test(root: Path, revision: dict, config: dict) -> int | None:
     if config.get("git", {}).get("pre_commit", {}).get("tests", True) is False:
@@ -79,27 +79,44 @@ def enqueue_test(root: Path, revision: dict, config: dict) -> int | None:
 
 
 def start_worker(root: Path, job_id: int) -> None:
-    """Spawn a detached process; no test execution in the Git hook process."""
-    options = {}
-    if os.name == "nt":
-        options["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-        )
-    else:
-        options["start_new_session"] = True
+    """Spawn a detached worker; no test execution in the Git hook process."""
+    options = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+        if os.name == "nt" else {"start_new_session": True}
+    )
     subprocess.Popen(
         [sys.executable, "-m", "codex_hooks.git_bridge", "worker", str(root), str(job_id)],
-        cwd=root,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        **options,
+        cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, close_fds=True, **options,
     )
+
+def _run_snapshot(
+    root: Path, job_id: int, tree: str, command: list[str], directory: Path, timeout: int
+) -> tuple[int, str]:
+    with tempfile.TemporaryDirectory(prefix=f"test-{job_id}-", dir=directory) as temp:
+        location = Path(temp)
+        archive, snapshot = location / "staged.zip", location / "snapshot"
+        snapshot.mkdir()
+        subprocess.run(
+            ["git", "archive", "--format=zip", "-o", str(archive), tree],
+            cwd=root, capture_output=True, check=True, timeout=30,
+        )
+        with zipfile.ZipFile(archive) as source:
+            if any(
+                not (snapshot / name).resolve().is_relative_to(snapshot.resolve())
+                for name in source.namelist()
+            ):
+                raise RuntimeError("Invalid archive path")
+            source.extractall(snapshot)
+        result = subprocess.run(
+            command, cwd=snapshot, capture_output=True,
+            text=True, errors="replace", timeout=timeout,
+        )
+        return result.returncode, (result.stdout + "\n" + result.stderr)[:100_000]
 
 
 def execute_job(root: Path, job_id: int, timeout: int = 600) -> str:
-    """Run isolated tests against an exported staged-tree snapshot."""
+    """Validate an immutable staged-tree snapshot and persist the outcome."""
     with Store(root, "git") as store:
         store.db.executescript(JOBS_SCHEMA)
         claimed = store.db.execute(
@@ -111,37 +128,19 @@ def execute_job(root: Path, job_id: int, timeout: int = 600) -> str:
         if claimed.rowcount != 1 or row is None:
             return "not-queued"
         tree, command_json = row
-    code = 1
-    output = ""
+        directory = store.directory
+
+    code, output = 1, ""
     try:
-        with Store(root, "git") as store, tempfile.TemporaryDirectory(
-            prefix=f"test-{job_id}-", dir=store.directory
-        ) as temp:
-            directory = Path(temp)
-            archive = directory / "staged.zip"
-            snapshot = directory / "snapshot"
-            snapshot.mkdir()
-            subprocess.run(
-                ["git", "archive", "--format=zip", "-o", str(archive), tree],
-                cwd=root, capture_output=True, check=True, timeout=30,
-            )
-            with zipfile.ZipFile(archive) as source:
-                for item in source.namelist():
-                    target = (snapshot / item).resolve()
-                    if not target.is_relative_to(snapshot.resolve()):
-                        raise RuntimeError("Invalid archive path")
-                source.extractall(snapshot)
-            result = subprocess.run(
-                json.loads(command_json), cwd=snapshot, capture_output=True,
-                text=True, errors="replace", timeout=timeout,
-            )
-            code = result.returncode
-            output = (result.stdout + "\n" + result.stderr)[:100_000]
+        code, output = _run_snapshot(
+            root, job_id, tree, json.loads(command_json), directory, timeout
+        )
     except (OSError, RuntimeError, subprocess.SubprocessError, zipfile.BadZipFile) as exc:
-        output = f"{type(exc).__name__}"
+        output = type(exc).__name__
+
+    status = "passed" if code == 0 else "failed"
     digest = hashlib.sha256(output.encode("utf-8", "replace")).hexdigest()
     with Store(root, "git") as store:
-        status = "passed" if code == 0 else "failed"
         store.db.execute(
             """UPDATE git_test_jobs SET status=?, exit_code=?, output_sha256=?,
                finished_at=CURRENT_TIMESTAMP WHERE id=?""",
@@ -152,7 +151,6 @@ def execute_job(root: Path, job_id: int, timeout: int = 600) -> str:
             {"job_id": job_id, "status": status, "staged_tree": tree, "exit_code": code},
         )
     return status
-
 
 def jobs(root: Path) -> list[dict]:
     with Store(root, "git") as store:
