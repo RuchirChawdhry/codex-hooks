@@ -18,12 +18,18 @@ context_restore = true
 session_summary = true
 agent_handoff = true
 test_failure = true
+context_checkpoint = true
+environment_detection = true
+uv_guard = true
 
 [failure_loop]
 threshold = 2
 
 [agent_handoff]
 strict = false
+
+[python]
+uv_only = true
 """
 
 
@@ -36,7 +42,7 @@ def native_config() -> dict:
                     "type": "command",
                     "command": "codex-hooks hook",
                     "commandWindows": "codex-hooks hook",
-                    "timeout": 2 if event == "SessionEnd" else 10,
+                    "timeout": 2 if event in ("SessionEnd", "Interrupt") else 10,
                     "statusMessage": f"Codex Hooks: {event}",
                 }],
             }] for event in EVENTS

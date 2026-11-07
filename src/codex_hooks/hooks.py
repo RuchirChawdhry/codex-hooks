@@ -10,8 +10,9 @@ import tomllib
 from pathlib import Path
 
 from .state import Store, repository_root
+from .extended import context_checkpoint, detect_environment, environment_context, uv_policy
 
-EVENTS = ("PostToolUse", "PreCompact", "SessionStart", "SessionEnd", "SubagentStop")
+EVENTS = ("PreToolUse", "PostToolUse", "PreCompact", "SessionStart", "SessionEnd", "SubagentStop", "Interrupt")
 HOOKS = (
     "change_tracker",
     "failure_loop",
@@ -20,6 +21,9 @@ HOOKS = (
     "session_summary",
     "agent_handoff",
     "test_failure",
+    "context_checkpoint",
+    "environment_detection",
+    "uv_guard",
 )
 TEST_COMMAND = re.compile(
     r"\b(?:pytest|unittest|vitest|jest|mocha|cargo\s+test|go\s+test|"
@@ -176,6 +180,7 @@ def checkpoint(store: Store) -> dict:
         "test_failures": store.recent("test_failure", 5),
         "failure_loops": store.recent("failure_loop", 3),
         "handoffs": store.recent("agent_handoff", 5),
+        "environment": store.get("environment", {}),
     }
 
 
@@ -275,10 +280,32 @@ def dispatch(event: dict) -> dict:
     config = config_for(root)
     session = str(event.get("session_id") or "unknown")
     with Store(root, session) as store:
+        if name == "PreToolUse":
+            if enabled(config, "uv_guard") and config.get("python", {}).get("uv_only", True):
+                return uv_policy(event.get("tool_name"), command_of(event))
+            return {}
+
         if name == "SessionStart":
             if enabled(config, "change_tracker") and store.get("worktree") is None:
                 store.put("worktree", git_worktree(root))
-            return context_restore(store, event) if enabled(config, "context_restore") else {}
+            contexts: list[str] = []
+            if enabled(config, "environment_detection"):
+                environment = detect_environment(root)
+                store.put("environment", environment)
+                contexts.append(environment_context(environment, enabled(config, "uv_guard")))
+            if enabled(config, "context_restore"):
+                restored = context_restore(store, event)
+                if restored:
+                    contexts.append(restored["hookSpecificOutput"]["additionalContext"])
+            if contexts:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": "\n".join(contexts)[:4200],
+                    }
+                }
+            return {}
+
         if name == "PostToolUse":
             if enabled(config, "change_tracker"):
                 change_tracker(store)
@@ -287,20 +314,39 @@ def dispatch(event: dict) -> dict:
             code = result_code(event.get("tool_response"), output)
             if enabled(config, "test_failure"):
                 test_failure(store, event, command, output, code)
+            feedback = None
             if enabled(config, "failure_loop"):
                 feedback = failure_loop(store, event, command, output, code, config)
-                if feedback:
-                    return {
-                        "hookSpecificOutput": {
-                            "hookEventName": "PostToolUse",
-                            "additionalContext": feedback,
-                        }
+            if enabled(config, "context_checkpoint"):
+                if not enabled(config, "change_tracker"):
+                    store.put("worktree", git_worktree(root))
+                context_checkpoint(store, checkpoint(store), "tool")
+            if feedback:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": feedback,
                     }
+                }
             return {}
-        if name == "PreCompact" and enabled(config, "context_snapshot"):
-            context_snapshot(store, event)
-        elif name == "SubagentStop" and enabled(config, "agent_handoff"):
-            return agent_handoff(store, event, config)
-        elif name == "SessionEnd" and enabled(config, "session_summary"):
-            session_summary(store, event)
+
+        if name == "PreCompact":
+            if enabled(config, "context_snapshot"):
+                context_snapshot(store, event)
+            if enabled(config, "context_checkpoint"):
+                context_checkpoint(store, checkpoint(store), "precompact")
+        elif name == "SubagentStop":
+            result = agent_handoff(store, event, config) if enabled(config, "agent_handoff") else {}
+            if enabled(config, "context_checkpoint"):
+                context_checkpoint(store, checkpoint(store), "subagent")
+            return result
+        elif name == "Interrupt":
+            if enabled(config, "context_checkpoint"):
+                # Persist the latest observed evidence, even if compaction never occurs.
+                context_checkpoint(store, checkpoint(store), "interrupt")
+        elif name == "SessionEnd":
+            if enabled(config, "context_checkpoint"):
+                context_checkpoint(store, checkpoint(store), "session_end")
+            if enabled(config, "session_summary"):
+                session_summary(store, event)
     return {}
