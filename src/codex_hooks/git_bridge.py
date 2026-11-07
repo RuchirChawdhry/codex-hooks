@@ -167,7 +167,9 @@ def install_git_hooks(root: Path) -> Path:
     directory = root / ".githooks"
     current = git(root, "config", "--local", "--get", "core.hooksPath", check=False)
     configured = current.stdout.strip()
-    if configured and configured != ".githooks":
+    # An absolute path makes the same wrappers available to newly created worktrees.
+    target_path = str(directory.resolve())
+    if configured and configured != ".githooks" and Path(configured).resolve() != directory.resolve():
         raise FileExistsError(f"core.hooksPath already points to {configured}; not replacing.")
     # Switching core.hooksPath must not silently disable previously active hooks.
     if not configured:
@@ -191,7 +193,7 @@ def install_git_hooks(root: Path) -> Path:
         target.write_text(hook_script(name), encoding="utf-8", newline="\n")
         if os.name != "nt":
             target.chmod(0o755)
-    git(root, "config", "--local", "core.hooksPath", ".githooks")
+    git(root, "config", "--local", "core.hooksPath", target_path)
     return directory
 
 

@@ -127,8 +127,16 @@ def test_installer_is_idempotent_and_does_not_replace_hooks(repo: Path) -> None:
     assert set(path.name for path in directory.iterdir()) == {
         "commit-msg", "pre-commit", "post-checkout"
     }
-    assert git_bridge.git(repo, "config", "--local", "--get", "core.hooksPath").stdout.strip() == ".githooks"
+    assert git_bridge.git(repo, "config", "--local", "--get", "core.hooksPath").stdout.strip() == str(directory.resolve())
     assert git_bridge.install_git_hooks(repo) == directory
+    # A different linked worktree can still resolve the shared wrappers.
+    sibling = repo.parent / "linked"
+    original_hooks_path = str(directory.resolve())
+    git_bridge.git(repo, "config", "--local", "--unset", "core.hooksPath")
+    git_bridge.git(repo, "commit", "--allow-empty", "-m", "chore: initialize repo")
+    git_bridge.git(repo, "config", "--local", "core.hooksPath", original_hooks_path)
+    git_bridge.git(repo, "worktree", "add", "--no-checkout", "--detach", str(sibling))
+    assert (Path(git_bridge.git(sibling, "config", "--get", "core.hooksPath").stdout.strip()) / "post-checkout").exists()
     if os.name != "nt":
         assert os.access(directory / "pre-commit", os.X_OK)
     (directory / "pre-commit").write_text("echo different")

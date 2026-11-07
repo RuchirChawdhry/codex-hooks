@@ -117,7 +117,8 @@ Install the three local Git hooks inside a target Git repository:
     codex-hooks git install
 
 The installer creates executable shell wrappers in .githooks/ and sets
-core.hooksPath=.githooks locally. It refuses to replace custom existing hook
+core.hooksPath to the absolute .githooks directory for all linked worktrees.
+It refuses to replace custom existing hook
 paths or conflicting scripts. The Python package install alone does not
 activate local Git hooks.
 
