@@ -27,19 +27,19 @@ def repository_root(cwd: str) -> Path:
 
 
 def state_directory(root: Path) -> Path:
-    configured = os.environ.get("CODEX_HOOKS_STATE_DIR")
-    if configured:
-        base = Path(configured).expanduser()
-    elif os.name == "nt":
-        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "codex-hooks"
-    else:
-        base = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
-        base /= "codex-hooks"
+    default = (
+        Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "codex-hooks"
+        if os.name == "nt"
+        else Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state")))
+        / "codex-hooks"
+    )
+    base = Path(os.environ["CODEX_HOOKS_STATE_DIR"]).expanduser() if os.environ.get(
+        "CODEX_HOOKS_STATE_DIR"
+    ) else default
     digest = hashlib.sha256(os.path.normcase(str(root)).encode()).hexdigest()[:20]
     path = base / digest
     path.mkdir(parents=True, exist_ok=True)
     return path
-
 
 class Store:
     def __init__(self, root: Path, session: str):
