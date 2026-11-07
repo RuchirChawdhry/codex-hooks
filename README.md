@@ -3,7 +3,7 @@
 Modular, deterministic lifecycle hooks for OpenAI Codex. Version 0.1 focuses
 on observability, debugging signals, continuity, and structured handoffs.
 
-## The first seven hooks
+## Included hooks
 
 | Behavior | Codex event | Purpose |
 | --- | --- | --- |
@@ -64,7 +64,7 @@ pip invocations are denied rather than silently altered.
 
 Rewriting requires Codex permissionDecision=allow with updatedInput, which may
 affect normal tool approvals. Disable with [python] uv_only=false or
-[hooks] uv_guard=false. Check generated hook commands before trusting them.
+[hooks] uv_rewrite=false. Check generated hook commands before trusting them.
 
 Subagent handoffs are advisory by default. To enforce them, set:
 

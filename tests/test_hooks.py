@@ -10,8 +10,8 @@ import pytest
 
 from codex_hooks.cli import initialize, native_config
 from codex_hooks.hooks import dispatch, parse_handoff
-from codex_hooks.uv_rewrite import translate
 from codex_hooks.state import Store, repository_root
+from codex_hooks.uv_rewrite import translate
 
 
 @pytest.fixture

@@ -24,7 +24,7 @@ HOOKS = (
     "test_failure",
     "context_checkpoint",
     "environment_detection",
-    "uv_guard",
+    "uv_rewrite",
 )
 TEST_COMMAND = re.compile(
     r"\b(?:pytest|unittest|vitest|jest|mocha|cargo\s+test|go\s+test|"
@@ -282,7 +282,7 @@ def dispatch(event: dict) -> dict:
     session = str(event.get("session_id") or "unknown")
     with Store(root, session) as store:
         if name == "PreToolUse":
-            if enabled(config, "uv_guard") and config.get("python", {}).get("uv_only", True):
+            if enabled(config, "uv_rewrite") and config.get("python", {}).get("uv_only", True):
                 return uv_policy(event, root)
             return {}
 
@@ -293,7 +293,7 @@ def dispatch(event: dict) -> dict:
             if enabled(config, "environment_detection"):
                 environment = detect_environment(root)
                 store.put("environment", environment)
-                contexts.append(environment_context(environment, enabled(config, "uv_guard")))
+                contexts.append(environment_context(environment, enabled(config, "uv_rewrite")))
             if enabled(config, "context_restore"):
                 restored = context_restore(store, event)
                 if restored:

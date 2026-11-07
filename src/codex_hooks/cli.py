@@ -20,7 +20,7 @@ agent_handoff = true
 test_failure = true
 context_checkpoint = true
 environment_detection = true
-uv_guard = true
+uv_rewrite = true
 
 [failure_loop]
 threshold = 2
