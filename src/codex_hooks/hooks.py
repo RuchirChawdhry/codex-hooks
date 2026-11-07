@@ -33,8 +33,10 @@ SECRETISH = re.compile(r"(?i)(?:password|token|secret|api[_-]?key)\s*[:=]\s*\S+"
 
 def config_for(root: Path) -> dict:
     path = root / ".codex-hooks.toml"
+    if not path.is_file():
+        return {}
     with path.open("rb") as stream:
-        return tomllib.load(stream) if path.exists() else {}
+        return tomllib.load(stream)
 
 
 def enabled(config: dict, name: str) -> bool:
@@ -207,7 +209,7 @@ def parse_handoff(message: object) -> dict | None:
     if not isinstance(message, str):
         return None
     trimmed = message.strip()
-    match = re.search(r"(?s)^"+r"\\x60{3}(?:json)?\s*(.*?)\s*\\x60{3}$", trimmed)
+    match = re.fullmatch(chr(96) * 3 + r"(?:json)?\s*(.*?)\s*" + chr(96) * 3, trimmed, flags=re.S)
     if match:
         trimmed = match.group(1)
     try:

@@ -1,0 +1,14 @@
+[hooks]
+change_tracker = true
+failure_loop = true
+context_snapshot = true
+context_restore = true
+session_summary = true
+agent_handoff = true
+test_failure = true
+
+[failure_loop]
+threshold = 2
+
+[agent_handoff]
+strict = false

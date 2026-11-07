@@ -1,0 +1,16 @@
+version: "3"
+
+tasks:
+  test:
+    cmds:
+      - uv run --group dev pytest -q
+  lint:
+    cmds:
+      - uv run --group dev ruff check .
+  check:
+    cmds:
+      - task: lint
+      - task: test
+  install:
+    cmds:
+      - uv tool install --editable .
