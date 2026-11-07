@@ -233,7 +233,10 @@ def test_environment_only_uses_uv_pip(workspace: Path) -> None:
     assert result["updatedInput"]["command"] == "uv pip install httpx"
 
 
-def test_no_project_or_venv_requires_explicit_uv_setup(workspace: Path) -> None:
+def test_no_project_or_venv_requires_explicit_uv_setup(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     result = dispatch(pretool(workspace, "pip install httpx"))["hookSpecificOutput"]
     assert result["permissionDecision"] == "deny"
     assert "uv venv" in result["permissionDecisionReason"]
