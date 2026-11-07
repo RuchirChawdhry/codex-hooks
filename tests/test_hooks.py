@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from codex_hooks.cli import initialize, main, native_config
-from codex_hooks.hooks import EVENTS, EVENT_HANDLERS, dispatch, parse_handoff
+from codex_hooks.hooks import EVENT_HANDLERS, EVENTS, dispatch, parse_handoff
 from codex_hooks.state import Store, repository_root
 from codex_hooks.uv_rewrite import translate
 
