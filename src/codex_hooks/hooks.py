@@ -148,6 +148,13 @@ def test_failure(store: Store, event: dict, command: str, output: str, code: int
     store.record("test_failure", record)
 
 
+def _clear_failure_loop(store: Store, loops: dict, key: str) -> None:
+    if key not in loops:
+        return
+    loops.pop(key)
+    store.put("failure_loops", loops)
+
+
 def failure_loop(store: Store, event: dict, command: str, output: str, code: int | None, config: dict) -> str | None:
     if not command:
         return None
@@ -155,9 +162,7 @@ def failure_loop(store: Store, event: dict, command: str, output: str, code: int
     all_loops = store.get("failure_loops", {})
     previous = all_loops.get(key, {})
     if code is None or code == 0:
-        if key in all_loops:
-            del all_loops[key]
-            store.put("failure_loops", all_loops)
+        _clear_failure_loop(store, all_loops, key)
         return None
     # Store only fingerprints of potentially sensitive command/output.
     signature = fingerprint(f"{code}:{SECRETISH.sub('[redacted]', output)[:1500]}")

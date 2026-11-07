@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from codex_hooks.cli import initialize, native_config
-from codex_hooks.hooks import dispatch, parse_handoff
+from codex_hooks.cli import initialize, main, native_config
+from codex_hooks.hooks import EVENTS, EVENT_HANDLERS, dispatch, parse_handoff
 from codex_hooks.state import Store, repository_root
 from codex_hooks.uv_rewrite import translate
 
@@ -283,3 +284,41 @@ def test_explicit_project_translation_requirements() -> None:
     assert translate(["uninstall", "requests"], project=True, venv=False) == [
         "uv", "remove", "requests"
     ]
+
+
+
+def test_all_codex_events_have_dispatch_handlers() -> None:
+    assert set(EVENT_HANDLERS) == set(EVENTS)
+    assert all(callable(handler) for handler in EVENT_HANDLERS.values())
+
+
+def test_cli_list_and_doctor_use_dispatch(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.chdir(workspace)
+    main(["list"])
+    assert "change_tracker" in capsys.readouterr().out
+    main(["doctor"])
+    assert '"events"' in capsys.readouterr().out
+
+
+def test_cli_hook_and_replay_share_native_output(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    payload = {"hook_event_name": "NoSuchEvent", "cwd": str(workspace)}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
+    main(["hook"])
+    assert json.loads(capsys.readouterr().out) == {}
+    record = workspace / "event.json"
+    record.write_text(json.dumps(payload))
+    main(["replay", str(record)])
+    assert json.loads(capsys.readouterr().out) == {}
+
+
+def test_cli_init_dispatch(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.chdir(workspace)
+    main(["init"])
+    assert (workspace / ".codex" / "hooks.json").is_file()
+    assert "Installed:" in capsys.readouterr().out
