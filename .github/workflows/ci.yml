@@ -1,0 +1,18 @@
+name: Verify
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.14"
+      - name: Lint
+        run: uv run --group dev ruff check .
+      - name: Unit and contract tests
+        run: uv run --group dev pytest -q
