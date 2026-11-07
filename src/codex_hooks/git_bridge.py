@@ -157,6 +157,15 @@ def hook_script(name: str) -> str:
     return f'#!/bin/sh\nexec codex-hooks git {name} "$@"\n'
 
 
+def _active_default_hook(root: Path) -> Path | None:
+    path = Path(git(root, "rev-parse", "--git-path", "hooks").stdout.strip())
+    path = path if path.is_absolute() else root / path
+    return next(
+        (candidate for name in GIT_HOOKS if (candidate := path / name).is_file()
+         and os.access(candidate, os.X_OK)), None
+    )
+
+
 def install_git_hooks(root: Path) -> Path:
     """Opt-in installation; never silently replace existing hooks."""
     if not (root / ".git").exists() and git(
@@ -170,18 +179,12 @@ def install_git_hooks(root: Path) -> Path:
     if configured and configured != ".githooks" and Path(configured).resolve() != directory.resolve():
         raise FileExistsError(f"core.hooksPath already points to {configured}; not replacing.")
 
-    if not configured:
-        default_hooks = Path(git(root, "rev-parse", "--git-path", "hooks").stdout.strip())
-        default_hooks = default_hooks if default_hooks.is_absolute() else root / default_hooks
-        existing = next(
-            (path for name in GIT_HOOKS if (path := default_hooks / name).is_file()
-             and os.access(path, os.X_OK)), None
+    existing = _active_default_hook(root) if not configured else None
+    if existing:
+        raise FileExistsError(
+            f"Existing Git hook {existing} would be disabled; "
+            "migrate or chain it explicitly before installing."
         )
-        if existing:
-            raise FileExistsError(
-                f"Existing Git hook {existing} would be disabled; "
-                "migrate or chain it explicitly before installing."
-            )
 
     conflicting = next(
         (path for name in GIT_HOOKS if (path := directory / name).exists()

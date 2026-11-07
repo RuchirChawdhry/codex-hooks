@@ -53,23 +53,29 @@ def environment_context(environment: dict, uv_guard_enabled: bool) -> str:
     languages = environment["languages"]
     if not languages:
         return ""
-    notes = [f"Detected repository languages: {', '.join(languages)}."]
-    if "python" in languages:
-        notes.append(
-            "Use uv for all Python dependency operations: uv sync, uv add, "
-            "uv remove, uv run, and uv pip when an imperative pip-compatible operation is needed."
-        )
-        if uv_guard_enabled:
-            notes.append(
-                "Direct pip invocations are rewritten into uv operations when safe; "
-                "unsupported forms are denied."
-            )
-        if not environment["uv_available"]:
-            notes.append("uv was not found on PATH; install uv before managing Python dependencies.")
+    python = "python" in languages
     javascript = environment["package_managers"].get("javascript")
-    if javascript:
-        notes.append(f"JavaScript package manager: {javascript}.")
-    return " ".join(notes)
+    optional = [
+        (
+            python,
+            "Use uv for all Python dependency operations: uv sync, uv add, "
+            "uv remove, uv run, and uv pip when an imperative pip-compatible operation is needed.",
+        ),
+        (
+            python and uv_guard_enabled,
+            "Direct pip invocations are rewritten into uv operations when safe; "
+            "unsupported forms are denied.",
+        ),
+        (
+            python and not environment["uv_available"],
+            "uv was not found on PATH; install uv before managing Python dependencies.",
+        ),
+        (bool(javascript), f"JavaScript package manager: {javascript}."),
+    ]
+    return " ".join([
+        f"Detected repository languages: {', '.join(languages)}.",
+        *(text for condition, text in optional if condition),
+    ])
 
 def context_checkpoint(store: Store, value: dict, reason: str) -> bool:
     """Persist a checkpoint only when its material contents have changed."""

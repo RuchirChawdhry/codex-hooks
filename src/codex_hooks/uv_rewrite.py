@@ -141,9 +141,9 @@ def uv_policy(event: dict, root: Path) -> dict:
         return {}
     tokens = tokens_of(command)
     args = pip_args(tokens) if tokens else None
+    if args is None and not AT_START.search(command):
+        return {}
     if args is None:
-        if not AT_START.search(command):
-            return {}
         return deny("Compound, nested, or dynamic pip command. Use an explicit uv command.")
     cwd = Path(str(event.get("cwd") or root)).resolve()
     is_project = project_at(cwd, root) is not None

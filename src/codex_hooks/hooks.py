@@ -122,16 +122,18 @@ def response_text(response: object) -> str:
 
 
 def result_code(response: object, text: str) -> int | None:
-    if isinstance(response, dict):
-        for key in ("exit_code", "exitCode", "returncode"):
-            value = response.get(key)
-            if isinstance(value, int) and not isinstance(value, bool):
-                return value
-        if response.get("isError") is True:
-            return 1
+    data = response if isinstance(response, dict) else {}
+    code = next(
+        (value for key in ("exit_code", "exitCode", "returncode")
+         if isinstance(value := data.get(key), int) and not isinstance(value, bool)),
+        None,
+    )
+    if code is not None:
+        return code
+    if data.get("isError") is True:
+        return 1
     match = EXIT_CODE.search(text)
     return int(match.group(1)) if match else None
-
 
 def test_failure(store: Store, event: dict, command: str, output: str, code: int | None) -> None:
     if not TEST_COMMAND.search(command) or code is None or code == 0:
@@ -281,10 +283,10 @@ def _session_start(store: Store, event: dict, config: dict) -> dict:
         environment = detect_environment(store.root)
         store.put("environment", environment)
         contexts.append(environment_context(environment, enabled(config, "uv_rewrite")))
-    if enabled(config, "context_restore"):
-        restored = context_restore(store, event)
-        if restored:
-            contexts.append(restored["hookSpecificOutput"]["additionalContext"])
+    restored = context_restore(store, event) if enabled(config, "context_restore") else {}
+    contexts.extend(
+        [restored["hookSpecificOutput"]["additionalContext"]] if restored else []
+    )
     context = "\n".join(part for part in contexts if part)[:4200]
     if not context:
         return {}
@@ -303,9 +305,9 @@ def _post_tool(store: Store, event: dict, config: dict) -> dict:
         failure_loop(store, event, command, output, code, config)
         if enabled(config, "failure_loop") else None
     )
+    if enabled(config, "context_checkpoint") and not enabled(config, "change_tracker"):
+        store.put("worktree", git_worktree(store.root))
     if enabled(config, "context_checkpoint"):
-        if not enabled(config, "change_tracker"):
-            store.put("worktree", git_worktree(store.root))
         context_checkpoint(store, checkpoint(store), "tool")
     if not feedback:
         return {}
