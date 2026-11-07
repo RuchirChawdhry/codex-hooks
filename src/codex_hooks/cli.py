@@ -78,6 +78,97 @@ def initialize(root: Path, force: bool = False) -> tuple[Path, Path]:
     return hook_file, config_file
 
 
+def _git_dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    from .git_bridge import install_git_hooks, run_git_hook
+    from .git_jobs import execute_job, jobs
+
+    root = repository_root(str(Path.cwd()))
+
+    def install() -> None:
+        print(f"Installed Git hooks: {install_git_hooks(root)}")
+
+    def show_jobs() -> None:
+        print(json.dumps(jobs(root), indent=2))
+
+    def worker() -> None:
+        if len(args.arguments) != 1:
+            parser.error("git worker requires a job ID")
+        print(execute_job(root, int(args.arguments[0])))
+
+    def pre_commit() -> None:
+        result = run_git_hook("pre-commit", args.arguments)
+        print(f"Staged revision: {result['staged_tree']} | test job: {result['test_job']}")
+
+    def post_checkout() -> None:
+        result = run_git_hook("post-checkout", args.arguments)
+        if result["initialized"]:
+            print(f"Initialized linked worktree (uv synced: {str(result['uv_sync']).lower()})")
+
+    actions = {
+        "install": install,
+        "jobs": show_jobs,
+        "worker": worker,
+        "pre-commit": pre_commit,
+        "post-checkout": post_checkout,
+        "commit-msg": lambda: run_git_hook("commit-msg", args.arguments),
+    }
+    try:
+        actions[args.action]()
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"codex-hooks git: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+
+def _hook_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    try:
+        data = json.load(sys.stdin)
+        if not isinstance(data, dict):
+            raise ValueError("Codex hook input must be a JSON object")
+        print(json.dumps(dispatch(data), separators=(",", ":")))
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"codex-hooks: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+
+def _init_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    try:
+        hook, config = initialize(Path.cwd(), args.force)
+    except FileExistsError as exc:
+        parser.error(str(exc))
+    print(f"Installed: {hook}\nConfiguration: {config}\nReview with /hooks in Codex.")
+
+
+def _doctor_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    path = Path.cwd() / ".codex" / "hooks.json"
+    print(json.dumps({
+        "executable": shutil.which("codex-hooks"),
+        "project_hooks": str(path) if path.is_file() else None,
+        "events": EVENTS,
+    }, indent=2))
+
+
+def _list_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    print("\n".join(HOOKS))
+
+
+def _replay_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    with args.path.open(encoding="utf-8") as source:
+        event = json.load(source)
+    if not isinstance(event, dict):
+        parser.error("Event JSON must be an object")
+    print(json.dumps(dispatch(event), indent=2))
+
+
+COMMAND_HANDLERS = {
+    "git": _git_dispatch,
+    "hook": _hook_command,
+    "init": _init_command,
+    "doctor": _doctor_command,
+    "list": _list_command,
+    "replay": _replay_command,
+}
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="codex-hooks")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -89,61 +180,9 @@ def main(argv: list[str] | None = None) -> None:
     replay = sub.add_parser("replay", help="Replay an event JSON")
     replay.add_argument("path", type=Path)
     git_parser = sub.add_parser("git", help="Install and run Git hooks")
-    git_parser.add_argument("action", choices=("install", "commit-msg", "pre-commit", "post-checkout", "jobs", "worker"))
+    git_parser.add_argument(
+        "action", choices=("install", "commit-msg", "pre-commit", "post-checkout", "jobs", "worker")
+    )
     git_parser.add_argument("arguments", nargs="*")
     args = parser.parse_args(argv)
-
-    if args.command == "git":
-        from .git_bridge import install_git_hooks, run_git_hook
-        from .git_jobs import execute_job, jobs
-
-        root = repository_root(str(Path.cwd()))
-        try:
-            if args.action == "install":
-                print(f"Installed Git hooks: {install_git_hooks(root)}")
-            elif args.action == "jobs":
-                print(json.dumps(jobs(root), indent=2))
-            elif args.action == "worker":
-                if len(args.arguments) != 1:
-                    parser.error("git worker requires a job ID")
-                print(execute_job(root, int(args.arguments[0])))
-            else:
-                result = run_git_hook(args.action, args.arguments)
-                if args.action == "pre-commit":
-                    print(f"Staged revision: {result['staged_tree']} | test job: {result['test_job']}")
-                elif args.action == "post-checkout" and result["initialized"]:
-                    print("Initialized linked worktree (uv synced: "
-                          + str(result["uv_sync"]).lower() + ")")
-        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-            print(f"codex-hooks git: {exc}", file=sys.stderr)
-            raise SystemExit(1) from exc
-    elif args.command == "hook":
-        try:
-            data = json.load(sys.stdin)
-            if not isinstance(data, dict):
-                raise ValueError("Codex hook input must be a JSON object")
-            print(json.dumps(dispatch(data), separators=(",", ":")))
-        except (OSError, ValueError, TypeError) as exc:
-            print(f"codex-hooks: {exc}", file=sys.stderr)
-            raise SystemExit(1) from exc
-    elif args.command == "init":
-        try:
-            hook, config = initialize(Path.cwd(), args.force)
-        except FileExistsError as exc:
-            parser.error(str(exc))
-        print(f"Installed: {hook}\nConfiguration: {config}\nReview with /hooks in Codex.")
-    elif args.command == "doctor":
-        path = Path.cwd() / ".codex" / "hooks.json"
-        print(json.dumps({
-            "executable": shutil.which("codex-hooks"),
-            "project_hooks": str(path) if path.is_file() else None,
-            "events": EVENTS,
-        }, indent=2))
-    elif args.command == "list":
-        print("\n".join(HOOKS))
-    elif args.command == "replay":
-        with args.path.open(encoding="utf-8") as source:
-            event = json.load(source)
-        if not isinstance(event, dict):
-            parser.error("Event JSON must be an object")
-        print(json.dumps(dispatch(event), indent=2))
+    COMMAND_HANDLERS[args.command](args, parser)
