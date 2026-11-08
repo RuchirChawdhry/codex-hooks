@@ -76,17 +76,15 @@ def format_staged(root: Path, config: dict) -> list[str]:
     paths = staged_python_files(root)
     if not paths:
         return []
-    resolved_root = root.resolve()
     for name in paths:
         candidate = root / name
         if (
             not candidate.is_file()
             or candidate.is_symlink()
-            or not candidate.resolve().is_relative_to(resolved_root)
+            or not candidate.resolve().is_relative_to(root.resolve())
         ):
             raise ValueError(f"Cannot safely auto-format this staged file: {name}")
-        diff = git(root, "diff", "--quiet", "--", name, check=False)
-        if diff.returncode != 0:
+        if git(root, "diff", "--quiet", "--", name, check=False).returncode:
             raise ValueError(
                 f"Staged Python file has additional unstaged edits: {name}. "
                 "Format and stage it manually before committing."
@@ -122,71 +120,79 @@ def linked_worktree(root: Path) -> bool:
     return Path(gitdir).resolve() != Path(common).resolve()
 
 
+def _sync_worktree(root: Path, config: dict) -> bool:
+    if not (root / "pyproject.toml").is_file():
+        return False
+    if config.get("git", {}).get("post_checkout", {}).get("uv_sync", True) is False:
+        return False
+    if shutil.which("uv") is None:
+        raise RuntimeError("New worktree needs uv sync, but uv is not on PATH")
+    command = ["uv", "sync", *(["--locked"] if (root / "uv.lock").is_file() else [])]
+    result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(
+            "Worktree uv sync failed: " + (result.stderr.strip() or result.stdout.strip())
+        )
+    return True
+
+
 def post_checkout(root: Path, previous: str, current: str, branch_flag: str) -> dict:
     """Initialize each linked worktree once, not each file/branch checkout."""
     if branch_flag != "1" or not linked_worktree(root):
         return {"initialized": False, "reason": "not a linked-worktree checkout"}
     with Store(root, "git") as store:
-        if store.get("worktree_initialized"):
-            return {"initialized": False, "reason": "already initialized"}
-    config = config_for(root)
-    project = root / "pyproject.toml"
-    synced = False
-    if (
-        project.is_file()
-        and config.get("git", {}).get("post_checkout", {}).get("uv_sync", True)
-    ):
-        if shutil.which("uv") is None:
-            raise RuntimeError("New worktree needs uv sync, but uv is not on PATH")
-        command = ["uv", "sync", "--locked"] if (root / "uv.lock").is_file() else [
-            "uv", "sync"
-        ]
-        result = subprocess.run(command, cwd=root, capture_output=True, text=True)
-        if result.returncode:
-            raise RuntimeError(
-                "Worktree uv sync failed: " + (result.stderr.strip() or result.stdout.strip())
-            )
-        synced = True
+        initialized = store.get("worktree_initialized")
+    if initialized:
+        return {"initialized": False, "reason": "already initialized"}
+    synced = _sync_worktree(root, config_for(root))
     with Store(root, "git") as store:
         store.put("worktree_initialized", True)
-        store.record(
-            "git_post_checkout",
-            {"previous": previous, "current": current, "worktree": str(root), "uv_sync": synced},
-        )
+        store.record("git_post_checkout", {
+            "previous": previous, "current": current,
+            "worktree": str(root), "uv_sync": synced,
+        })
     return {"initialized": True, "uv_sync": synced}
-
 
 def hook_script(name: str) -> str:
     return f'#!/bin/sh\nexec codex-hooks git {name} "$@"\n'
 
 
+def _active_default_hook(root: Path) -> Path | None:
+    path = Path(git(root, "rev-parse", "--git-path", "hooks").stdout.strip())
+    path = path if path.is_absolute() else root / path
+    return next(
+        (candidate for name in GIT_HOOKS if (candidate := path / name).is_file()
+         and os.access(candidate, os.X_OK)), None
+    )
+
+
 def install_git_hooks(root: Path) -> Path:
-    """Opt-in installation; refuse to overwrite other hooks or a custom hooksPath."""
-    if not (root / ".git").exists() and git(root, "rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
+    """Opt-in installation; never silently replace existing hooks."""
+    if not (root / ".git").exists() and git(
+        root, "rev-parse", "--is-inside-work-tree"
+    ).stdout.strip() != "true":
         raise ValueError("Not inside a Git working tree")
+
     directory = root / ".githooks"
-    current = git(root, "config", "--local", "--get", "core.hooksPath", check=False)
-    configured = current.stdout.strip()
-    # An absolute path makes the same wrappers available to newly created worktrees.
+    configured = git(root, "config", "--local", "--get", "core.hooksPath", check=False).stdout.strip()
     target_path = str(directory.resolve())
     if configured and configured != ".githooks" and Path(configured).resolve() != directory.resolve():
         raise FileExistsError(f"core.hooksPath already points to {configured}; not replacing.")
-    # Switching core.hooksPath must not silently disable previously active hooks.
-    if not configured:
-        default_hooks = Path(git(root, "rev-parse", "--git-path", "hooks").stdout.strip())
-        if not default_hooks.is_absolute():
-            default_hooks = root / default_hooks
-        for name in GIT_HOOKS:
-            existing = default_hooks / name
-            if existing.is_file() and os.access(existing, os.X_OK):
-                raise FileExistsError(
-                    f"Existing Git hook {existing} would be disabled; "
-                    "migrate or chain it explicitly before installing."
-                )
-    for name in GIT_HOOKS:
-        target = directory / name
-        if target.exists() and target.read_text(encoding="utf-8") != hook_script(name):
-            raise FileExistsError(f"{target} exists and differs; not overwriting.")
+
+    existing = _active_default_hook(root) if not configured else None
+    if existing:
+        raise FileExistsError(
+            f"Existing Git hook {existing} would be disabled; "
+            "migrate or chain it explicitly before installing."
+        )
+
+    conflicting = next(
+        (path for name in GIT_HOOKS if (path := directory / name).exists()
+         and path.read_text(encoding="utf-8") != hook_script(name)), None
+    )
+    if conflicting:
+        raise FileExistsError(f"{conflicting} exists and differs; not overwriting.")
+
     directory.mkdir(exist_ok=True)
     for name in GIT_HOOKS:
         target = directory / name
@@ -196,24 +202,24 @@ def install_git_hooks(root: Path) -> Path:
     git(root, "config", "--local", "core.hooksPath", target_path)
     return directory
 
-
 def run_git_hook(name: str, arguments: list[str]) -> dict | None:
     root = repository_root(str(Path.cwd()))
-    if name == "commit-msg":
-        if len(arguments) != 1:
-            raise ValueError("commit-msg requires one message file path")
+    arity = {"commit-msg": 1, "pre-commit": 0, "post-checkout": 3}
+    if name not in arity:
+        raise ValueError(f"Unsupported Git hook: {name}")
+    if len(arguments) != arity[name]:
+        raise ValueError(f"{name} requires {arity[name]} argument(s)")
+
+    def validated_message() -> dict:
         commit_msg(root, Path(arguments[0]))
         return {"validated": True}
-    if name == "pre-commit":
-        if arguments:
-            raise ValueError("pre-commit takes no arguments")
-        return pre_commit(root)
-    if name == "post-checkout":
-        if len(arguments) != 3:
-            raise ValueError("post-checkout requires old-ref new-ref checkout-flag")
-        return post_checkout(root, *arguments)
-    raise ValueError(f"Unsupported Git hook: {name}")
 
+    handlers = {
+        "commit-msg": validated_message,
+        "pre-commit": lambda: pre_commit(root),
+        "post-checkout": lambda: post_checkout(root, *arguments),
+    }
+    return handlers[name]()
 
 def main() -> None:
     """Independent worker entrypoint uses the installed package interpreter."""

@@ -79,37 +79,47 @@ def packages(names: list[str]) -> bool:
     )
 
 
+def _inspect(action: str, rest: list[str], project: bool, venv: bool) -> list[str] | None:
+    allowed = {
+        "freeze": not rest,
+        "check": not rest,
+        "show": packages(rest),
+        "list": rest in ([], ["--format", "json"], ["--format=json"]),
+    }
+    return ["uv", "pip", action, *rest] if allowed[action] else None
+
+
+def _install(action: str, rest: list[str], project: bool, venv: bool) -> list[str] | None:
+    requirements = len(rest) == 2 and rest[0] in ("-r", "--requirement")
+    names = ["-r", rest[1]] if requirements else rest
+    if not requirements and not packages(names):
+        return None
+    if project:
+        return ["uv", "add", *names]
+    return ["uv", "pip", "install", *names] if venv else None
+
+
+def _uninstall(action: str, rest: list[str], project: bool, venv: bool) -> list[str] | None:
+    names = [name for name in rest if name not in ("-y", "--yes")]
+    if not packages(names):
+        return None
+    if project:
+        return ["uv", "remove", *names]
+    return ["uv", "pip", "uninstall", *names] if venv else None
+
+
+TRANSLATORS = {
+    **{name: _inspect for name in ("list", "freeze", "show", "check")},
+    "install": _install,
+    "uninstall": _uninstall,
+}
+
+
 def translate(args: list[str], *, project: bool, venv: bool) -> list[str] | None:
     if not args:
         return None
-    action, rest = args[0].lower(), args[1:]
-    if action in ("list", "freeze", "show", "check"):
-        if action in ("freeze", "check") and rest:
-            return None
-        if action == "show" and not packages(rest):
-            return None
-        if action == "list" and rest not in ([], ["--format", "json"], ["--format=json"]):
-            return None
-        return ["uv", "pip", action, *rest]
-    if action == "install":
-        if len(rest) == 2 and rest[0] in ("-r", "--requirement"):
-            if project:
-                return ["uv", "add", "-r", rest[1]]
-            return ["uv", "pip", "install", "-r", rest[1]] if venv else None
-        if not packages(rest):
-            return None
-        if project:
-            return ["uv", "add", *rest]
-        return ["uv", "pip", "install", *rest] if venv else None
-    if action == "uninstall":
-        names = [name for name in rest if name not in ("-y", "--yes")]
-        if not packages(names):
-            return None
-        if project:
-            return ["uv", "remove", *names]
-        return ["uv", "pip", "uninstall", *names] if venv else None
-    return None
-
+    handler = TRANSLATORS.get(args[0].lower())
+    return handler(args[0].lower(), args[1:], project, venv) if handler else None
 
 def deny(reason: str) -> dict:
     return {
@@ -131,9 +141,9 @@ def uv_policy(event: dict, root: Path) -> dict:
         return {}
     tokens = tokens_of(command)
     args = pip_args(tokens) if tokens else None
+    if args is None and not AT_START.search(command):
+        return {}
     if args is None:
-        if not AT_START.search(command):
-            return {}
         return deny("Compound, nested, or dynamic pip command. Use an explicit uv command.")
     cwd = Path(str(event.get("cwd") or root)).resolve()
     is_project = project_at(cwd, root) is not None

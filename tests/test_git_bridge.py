@@ -235,3 +235,30 @@ def test_worker_failure_does_not_block_commit(
     job = git_jobs.enqueue_test(repo, git_bridge.git_revision(repo), config)
     assert git_jobs.execute_job(repo, job) == "failed"
     assert git_jobs.jobs(repo)[0]["exit_code"] == 7
+
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("does-not-exist", []),
+        ("commit-msg", []),
+        ("pre-commit", ["extra"]),
+        ("post-checkout", ["old", "new"]),
+    ],
+)
+def test_git_hook_dispatch_rejects_unknown_events_or_wrong_arity(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, name: str, arguments: list[str]
+) -> None:
+    monkeypatch.chdir(repo)
+    with pytest.raises(ValueError):
+        git_bridge.run_git_hook(name, arguments)
+
+
+def test_git_commit_msg_dispatch_table(
+    repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(repo)
+    message = repo / "commit-message.txt"
+    message.write_text("feat(git): dispatch hooks\n")
+    assert git_bridge.run_git_hook("commit-msg", [str(message)]) == {"validated": True}
