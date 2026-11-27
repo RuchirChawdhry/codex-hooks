@@ -8,6 +8,8 @@ import shlex
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import InvalidRequirement, Requirement
+
 TOOLS = frozenset({"Bash", "exec_command"})
 PIP = re.compile(r"pip(?:3(?:\.\d+)?)?(?:\.exe)?", re.I)
 PYTHON = re.compile(r"(?:python(?:3(?:\.\d+)?)?|py|pypy3?)(?:\.exe)?", re.I)
@@ -71,11 +73,19 @@ def pip_args(tokens: list[str]) -> list[str] | None:
     return None
 
 
-def packages(names: list[str]) -> bool:
-    return bool(names) and all(
-        name and not name.startswith("-") and name not in (".", "..")
-        and not name.startswith(("./", "../"))
-        for name in names
+def packages(names: list[str], *, bare: bool = False) -> bool:
+    """Accept literal PEP 508 requirements, not paths, URLs or pip options."""
+    if not names:
+        return False
+    try:
+        requirements = [Requirement(name) for name in names]
+    except InvalidRequirement:
+        return False
+    return all(
+        requirement.url is None and (
+            not bare or not (requirement.extras or requirement.specifier or requirement.marker)
+        )
+        for requirement in requirements
     )
 
 
@@ -83,7 +93,7 @@ def _inspect(action: str, rest: list[str], project: bool, venv: bool) -> list[st
     allowed = {
         "freeze": not rest,
         "check": not rest,
-        "show": packages(rest),
+        "show": packages(rest, bare=True),
         "list": rest in ([], ["--format", "json"], ["--format=json"]),
     }
     return ["uv", "pip", action, *rest] if allowed[action] else None
@@ -101,7 +111,7 @@ def _install(action: str, rest: list[str], project: bool, venv: bool) -> list[st
 
 def _uninstall(action: str, rest: list[str], project: bool, venv: bool) -> list[str] | None:
     names = [name for name in rest if name not in ("-y", "--yes")]
-    if not packages(names):
+    if not packages(names, bare=True):
         return None
     if project:
         return ["uv", "remove", *names]

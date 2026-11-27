@@ -322,3 +322,20 @@ def test_cli_init_dispatch(
     main(["init"])
     assert (workspace / ".codex" / "hooks.json").is_file()
     assert "Installed:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("requirement", ["requests[security]>=2", "demo~=1.2", "demo; python_version >= '3.11'"])
+def test_pep508_requirements(requirement):
+    assert translate(["install", requirement], project=True, venv=False) == ["uv", "add", requirement]
+
+
+@pytest.mark.parametrize("requirement", ["./local", "https://example.org/pkg.whl", "demo @ https://example.org/pkg.whl", "demo>=invalid", "demo[", "--index-url"])
+def test_invalid_or_unsupported_requirements(requirement):
+    assert translate(["install", requirement], project=True, venv=False) is None
+
+
+@pytest.mark.parametrize("action", ["show", "uninstall"])
+def test_package_name_only_operations(action):
+    assert translate([action, "demo>=1"], project=True, venv=False) is None
+    assert translate([action, "demo[extra]"], project=True, venv=False) is None
+    assert translate([action, "demo"], project=True, venv=False) is not None
